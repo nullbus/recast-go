@@ -13,6 +13,24 @@ func NewVector3(list []float32) Vector3 {
 	return list[:3]
 }
 
+func (v *Vector3) Parse(r io.Reader) (err error) {
+	reader := UtilReader{r: r}
+	if *v == nil {
+		*v = make(Vector3, 3)
+	}
+
+	if (*v)[0], err = reader.ReadFloat(); err != nil {
+		return err
+	}
+	if (*v)[1], err = reader.ReadFloat(); err != nil {
+		return err
+	}
+	if (*v)[2], err = reader.ReadFloat(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (v Vector3) CopyFrom(src Vector3) {
 	copy(v[:3], src[:3])
 }
@@ -162,6 +180,23 @@ func (u *UtilReader) ReadUint() (uint, error) {
 	return uint(u.endian().Uint32(buffer[:])), nil
 }
 
+func (u *UtilReader) ReadUint8() (uint8, error) {
+	var buffer [1]byte
+	if _, err := u.r.Read(buffer[:]); err != nil {
+		return 0, err
+	}
+
+	return buffer[0], nil
+}
+
+func (u *UtilReader) ReadUint16() (uint16, error) {
+	var buffer [2]byte
+	if _, err := u.r.Read(buffer[:]); err != nil {
+		return 0, err
+	}
+
+	return uint(u.endian().Uint16(buffer[:])), nil
+}
 func (u *UtilReader) ReadFloat() (float32, error) {
 	var buffer [4]byte
 	if _, err := u.r.Read(buffer[:]); err != nil {

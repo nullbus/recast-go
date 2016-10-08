@@ -2,6 +2,7 @@ package detour
 
 import (
 	"bytes"
+	"io"
 	"math"
 )
 
@@ -123,6 +124,33 @@ type Poly struct {
 	areaAndtype uint8
 }
 
+func (p *Poly) Parse(r io.Reader) (err error) {
+	reader := UtilReader{r: r}
+	if p.FirstLink, err = reader.ReadUint(); err != nil {
+		return err
+	}
+	for i := range p.Verts {
+		if p.Verts[i], err = reader.ReadUint16(); err != nil {
+			return err
+		}
+	}
+	for i := range p.Neis {
+		if p.Neis[i], err = reader.ReadUint16(); err != nil {
+			return err
+		}
+	}
+	if p.Flags, err = reader.ReadUint16(); err != nil {
+		return err
+	}
+	if p.VertCount, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	if p.areaAndtype, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Sets the user defined area id. [Limit: < #DT_MAX_AREAS]
 func (p *Poly) SetArea(a uint8) {
 	p.areaAndtype = (p.areaAndtype & 0xc0) | (a & 0x3f)
@@ -151,6 +179,23 @@ type PolyDetail struct {
 	TriCount  uint8 //< The number of triangles in the sub-mesh.
 }
 
+func (p *PolyDetail) Parse(r io.Reader) (err error) {
+	reader := UtilReader{r: r}
+	if p.VertBase, err = reader.ReadUint(); err != nil {
+		return err
+	}
+	if p.TriBase, err = reader.ReadUint(); err != nil {
+		return err
+	}
+	if p.VertCount, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	if p.TriCount, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Defines a link between polygons.
 // @note This structure is rarely if ever used by the end user.
 // @see dtMeshTile
@@ -161,6 +206,29 @@ type Link struct {
 	side uint8   //< If a boundary link, defines on which side the link is.
 	bmin uint8   //< If a boundary link, defines the minimum sub-edge area.
 	bmax uint8   //< If a boundary link, defines the maximum sub-edge area.
+}
+
+func (l *Link) Parse(r io.Reader) (err error) {
+	reader := UtilReader{r: r}
+	if l.ref, err = reader.ReadUint(); err != nil {
+		return err
+	}
+	if l.next, err = reader.ReadUint(); err != nil {
+		return err
+	}
+	if l.edge, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	if l.side, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	if l.bmin, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	if l.bmax, err = reader.ReadUint8(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Bounding volume node.
@@ -518,23 +586,58 @@ func (n *NavMesh) AddTile(data []byte, flags int, lastRef TileRef) (TileRef, err
 
 	// Patch header pointers.
 	var (
-		headerSize       = align4(sizeof(MeshHeader{}))
-		vertsSize        = align4(sizeof(float32(0)) * 3 * header.VertCount)
-		polysSize        = align4(sizeof(Poly{}) * header.PolyCount)
-		linksSize        = align4(sizeof(Link{}) * (header.MaxLinkCount))
-		detailMeshesSize = align4(sizeof(PolyDetail{}) * header.DetailMeshCount)
-		detailVertsSize  = align4(sizeof(float32(0)) * 3 * header.DetailVertCount)
-		detailTrisSize   = align4(sizeof(uint8(0)) * 4 * header.DetailTriCount)
-		bvtreeSize       = align4(sizeof(BVNode{}) * header.BVNodeCount)
-		offMeshLinksSize = align4(sizeof(OffMeshConnection{}) * header.OffMeshConCount)
+		headerSize = align4(sizeof(MeshHeader{}))
+		//vertsSize        = align4(sizeof(float32(0)) * 3 * header.VertCount)
+		//polysSize        = align4(sizeof(Poly{}) * header.PolyCount)
+		//linksSize        = align4(sizeof(Link{}) * (header.MaxLinkCount))
+		//detailMeshesSize = align4(sizeof(PolyDetail{}) * header.DetailMeshCount)
+		//detailVertsSize  = align4(sizeof(float32(0)) * 3 * header.DetailVertCount)
+		//detailTrisSize   = align4(sizeof(uint8(0)) * 4 * header.DetailTriCount)
+		bvtreeSize = align4(sizeof(BVNode{}) * header.BVNodeCount)
+		//offMeshLinksSize = align4(sizeof(OffMeshConnection{}) * header.OffMeshConCount)
 	)
 
 	d := bytes.NewBuffer(data[headerSize:])
 	//tile.verts = dtGetThenAdvanceBufferPointer<float>(d, vertsSize);
+	tile.Verts = make([]Vector3, header.VertCount)
+	for i := range tile.Verts {
+		if err := tile.Verts[i].Parse(d); err != nil {
+			return 0, err
+		}
+	}
+
 	//tile->polys = dtGetThenAdvanceBufferPointer<dtPoly>(d, polysSize);
+	tile.Polys = make([]Poly, header.PolyCount)
+	for i := range tile.Polys {
+		if err := tile.Polys[i].Parse(d); err != nil {
+			return 0, err
+		}
+	}
+
 	//tile->links = dtGetThenAdvanceBufferPointer<dtLink>(d, linksSize);
+	tile.Links = make([]Link, header.MaxLinkCount)
+	for i := range tile.Links {
+		if err := tile.Links[i].Parse(d); err != nil {
+			return 0, err
+		}
+	}
+
 	//tile->detailMeshes = dtGetThenAdvanceBufferPointer<dtPolyDetail>(d, detailMeshesSize);
+	tile.DetailMeshes = make([]PolyDetail, header.DetailMeshCount)
+	for i := range tile.DetailMeshes {
+		if err := tile.DetailMeshes[i].Parse(d); err != nil {
+			return 0, err
+		}
+	}
+
 	//tile->detailVerts = dtGetThenAdvanceBufferPointer<float>(d, detailVertsSize);
+	tile.DetailVerts = make([]float32, header.DetailVertCount)
+	for i := range tile.DetailMeshes {
+		if err := tile.DetailMeshes[i].Parse(d); err != nil {
+			return 0, err
+		}
+	}
+
 	//tile->detailTris = dtGetThenAdvanceBufferPointer<unsigned char>(d, detailTrisSize);
 	//tile->bvTree = dtGetThenAdvanceBufferPointer<dtBVNode>(d, bvtreeSize);
 	//tile->offMeshCons = dtGetThenAdvanceBufferPointer<dtOffMeshConnection>(d, offMeshLinksSize);
@@ -1351,7 +1454,7 @@ func (n *NavMesh) closestPointOnPoly(ref PolyRef, pos Vector3) (closest Vector3,
 			if t[k] < poly.VertCount {
 				v[k] = tile.Verts[poly.Verts[t[k]]]
 			} else {
-				v[k] = tile.Verts[(pd.VertBase + uint(t[k] - poly.VertCount))]
+				v[k] = tile.Verts[(pd.VertBase + uint(t[k]-poly.VertCount))]
 			}
 		}
 
