@@ -35,7 +35,7 @@ const (
 	DT_EXT_LINK = 0x8000
 
 	// A value that indicates the entity does not link to anything.
-	DT_NULL_LINK = 0xffffffff
+	DT_NULL_LINK uint = 0xffffffff
 
 	// A flag that indicates that an off-mesh connection can be traversed in both directions. (Is bidirectional.)
 	DT_OFFMESH_CON_BIDIR = 1
@@ -394,7 +394,7 @@ type MeshTile struct {
 
 	Data []byte //< The tile data. (Not directly accessed under normal situations.)
 	//DataSize int       //< Size of the tile data.
-	Flags int       //< Tile flags. (See: #dtTileFlags)
+	Flags TileFlags //< Tile flags. (See: #dtTileFlags)
 	Next  *MeshTile //< The next free tile, or the next tile in the spatial grid.
 }
 
@@ -482,7 +482,7 @@ func (n *NavMesh) InitWithParams(params NavMeshParams) error {
 //  @param[in]	flags		The tile flags. (See: #dtTileFlags)
 // @return The status flags for the operation.
 //  @see dtCreateNavMeshData
-func (n *NavMesh) Init(data []byte, flags int) error {
+func (n *NavMesh) Init(data []byte, flags TileFlags) error {
 	// Make sure the data is in right format.
 	var header MeshHeader
 	if err := header.Unmarshal(data); err != nil {
@@ -521,7 +521,7 @@ func (n *NavMesh) GetParams() NavMeshParams {
 //  @param[in]		lastRef		The desired reference for the tile. (When reloading a tile.) [opt] [Default: 0]
 //  @param[out]	result		The tile reference. (If the tile was succesfully added.) [opt]
 // @return The status flags for the operation.
-func (n *NavMesh) AddTile(data []byte, flags int, lastRef TileRef) (TileRef, error) {
+func (n *NavMesh) AddTile(data []byte, flags TileFlags, lastRef TileRef) (TileRef, error) {
 	// Make sure the data is in right format.
 	var header MeshHeader
 	if err := header.Unmarshal(data); err != nil {
@@ -668,12 +668,9 @@ func (n *NavMesh) AddTile(data []byte, flags int, lastRef TileRef) (TileRef, err
 	n.connectExtOffMeshLinks(tile, tile, -1)
 
 	// Create connections with neighbour tiles.
-	const MAX_NEIS = 32
-	var neis [MAX_NEIS]*MeshTile
-
 	// Connect with layers in current tile.
-	nneis := n.GetTilesAt(header.X, header.Y, neis[:])
-	for j := 0; j < nneis; j++ {
+	neis := n.GetTilesAt(header.X, header.Y)
+	for j := range neis {
 		if neis[j] == tile {
 			continue
 		}
@@ -686,8 +683,8 @@ func (n *NavMesh) AddTile(data []byte, flags int, lastRef TileRef) (TileRef, err
 
 	// Connect with neighbour tiles.
 	for i := 0; i < 8; i++ {
-		nneis := n.getNeighbourTilesAt(header.X, header.Y, i, neis[:])
-		for j := 0; j < nneis; j++ {
+		neis := n.getNeighbourTilesAt(header.X, header.Y, i)
+		for j := range neis {
 			n.connectExtLinks(tile, neis[j], i)
 			n.connectExtLinks(neis[j], tile, oppositeTile(i))
 			n.connectExtOffMeshLinks(tile, neis[j], i)
@@ -701,8 +698,89 @@ func (n *NavMesh) AddTile(data []byte, flags int, lastRef TileRef) (TileRef, err
 // Removes the specified tile from the navigation mesh.
 //  @param[in]		ref			The reference of the tile to remove.
 // @return The Data associated with deleted tile and status flags for the operation.
-func (n *NavMesh) RemoveTile(ref TileRef) ([]byte, error) {
-	panic("implement")
+func (n *NavMesh) RemoveTile(ref TileRef) (ret []byte, _ error) {
+	if ref == 0 {
+		return nil, statusError(DT_FAILURE | DT_INVALID_PARAM)
+	}
+
+	tileIndex := n.DecodePolyIdTile(PolyRef(ref))
+	tileSalt := n.DecodePolyIdSalt(PolyRef(ref))
+	if int(tileIndex) >= n.maxTiles {
+		return nil, statusError(DT_FAILURE | DT_INVALID_PARAM)
+	}
+
+	tile := &n.tiles[tileIndex]
+	if tile.Salt != tileSalt {
+		return nil, statusError(DT_FAILURE | DT_INVALID_PARAM)
+	}
+
+	// Remove tile from hash lookup
+	h := computeTileHash(tile.Header.X, tile.Header.Y, n.tileLutMask)
+	var prev *MeshTile
+	var cur = n.posLookup[h]
+	for cur != nil {
+		if cur == tile {
+			if prev != nil {
+				prev.Next = cur.Next
+			} else {
+				n.posLookup[h] = cur.Next
+			}
+
+			break
+		}
+
+		prev, cur = cur, cur.Next
+	}
+
+	// Remove connections to neighbour tiles
+	// Disconnet from other layers in current tile
+	neis := n.GetTilesAt(tile.Header.X, tile.Header.Y)
+	for i := range neis {
+		if neis[i] == tile {
+			continue
+		}
+
+		n.unconnectLinks(neis[i], tile)
+	}
+
+	// Disconnect from neighbour tiles
+	for i := 0; i < 8; i++ {
+		neis = n.getNeighbourTilesAt(tile.Header.X, tile.Header.Y, i)
+		for j := range neis {
+			n.unconnectLinks(neis[j], tile)
+		}
+	}
+
+	// Reset tile
+	if tile.Flags&DT_TILE_FREE_DATA != 0 {
+		// Owns data
+		tile.Data = nil
+		ret = nil
+	} else {
+		ret = tile.Data
+	}
+
+	tile.Header = nil
+	tile.Flags = 0
+	tile.LinksFreeList = 0
+	tile.Polys = nil
+	tile.Verts = nil
+	tile.Links = nil
+	tile.DetailMeshes = nil
+	tile.DetailVerts = nil
+	tile.DetailTris = nil
+	tile.BVTree = nil
+	tile.OffMeshCons = nil
+
+	// Update salt, salt should never be zero
+	tile.Salt = (tile.Salt + 1) & ((1 << n.saltBits) - 1)
+	if tile.Salt == 0 {
+		tile.Salt++
+	}
+
+	// Add to free list
+	n.nextFree, tile.Next = tile, n.nextFree
+	return nil, nil
 }
 
 // @}
@@ -715,7 +793,9 @@ func (n *NavMesh) RemoveTile(ref TileRef) ([]byte, error) {
 //  @return	tx		The tile's x-location. (x, y)
 //  @return	ty		The tile's y-location. (x, y)
 func (n *NavMesh) CalcTileLoc(pos []float32) (tx, ty int) {
-	panic("implement")
+	x := math.Floor(float64((pos[0] - n.orig[0]) / n.tileWidth))
+	y := math.Floor(float64((pos[2] - n.orig[2]) / n.tileHeight))
+	return int(x), int(y)
 }
 
 // Gets the tile at the specified grid location.
@@ -724,7 +804,18 @@ func (n *NavMesh) CalcTileLoc(pos []float32) (tx, ty int) {
 //  @param[in]	layer	The tile's layer. (x, y, layer)
 // @return The tile, or null if the tile does not exist.
 func (n *NavMesh) GetTileAt(x, y, layer int) *MeshTile {
-	panic("implement")
+	// Find tile based on hash
+	h := computeTileHash(x, y, n.tileLutMask)
+	tile := n.posLookup[h]
+	for tile != nil {
+		if tile.Header != nil && tile.Header.X == x && tile.Header.Y == y && tile.Header.Layer == layer {
+			return tile
+		}
+
+		tile = tile.Next
+	}
+
+	return nil
 }
 
 // Gets all tiles at the specified grid location. (All layers.)
@@ -732,8 +823,21 @@ func (n *NavMesh) GetTileAt(x, y, layer int) *MeshTile {
 //  @param[in]		y			The tile's y-location. (x, y)
 //  @param[in]		maxTiles	The maximum tiles the tiles parameter can hold.
 // @return The tiles array.
-func (n *NavMesh) GetTilesAt(x, y int, tiles []*MeshTile) int {
-	panic("implement")
+func (n *NavMesh) GetTilesAt(x, y int) []*MeshTile {
+	tiles := []*MeshTile{}
+
+	// Find tile based on hash
+	h := computeTileHash(x, y, n.tileLutMask)
+	tile := n.posLookup[h]
+	for tile != nil {
+		if tile.Header != nil && tile.Header.X == x && tile.Header.Y == y {
+			tiles = append(tiles, tile)
+		}
+
+		tile = tile.Next
+	}
+
+	return tiles
 }
 
 // Gets the tile reference for the tile at specified grid location.
@@ -742,14 +846,26 @@ func (n *NavMesh) GetTilesAt(x, y int, tiles []*MeshTile) int {
 //  @param[in]	layer	The tile's layer. (x, y, layer)
 // @return The tile reference of the tile, or 0 if there is none.
 func (n *NavMesh) GetTileRefAt(x, y, layer int) TileRef {
-	panic("implement")
+	return n.GetTileRef(n.GetTileAt(x, y, layer))
 }
 
 // Gets the tile reference for the specified tile.
 //  @param[in]	tile	The tile.
 // @return The tile reference of the tile.
-func (n NavMesh) GetTileRef(tile *MeshTile) TileRef {
-	panic("implement")
+func (n *NavMesh) GetTileRef(tile *MeshTile) TileRef {
+	if tile == nil {
+		return 0
+	}
+
+	index := 0
+	for i := range n.tiles {
+		if tile == &n.tiles[i] {
+			index = i
+			break
+		}
+	}
+
+	return TileRef(n.EncodePolyId(tile.Salt, uint(index), 0))
 }
 
 // Gets the tile for the specified tile reference.
@@ -757,13 +873,28 @@ func (n NavMesh) GetTileRef(tile *MeshTile) TileRef {
 // @return The tile for the specified reference, or null if the
 //		reference is invalid.
 func (n *NavMesh) GetTileByRef(ref TileRef) *MeshTile {
-	panic("implement")
+	if ref == 0 {
+		return nil
+	}
+
+	tileIndex := n.DecodePolyIdTile(PolyRef(ref))
+	if int(tileIndex) >= n.maxTiles {
+		return nil
+	}
+
+	tile := &n.tiles[tileIndex]
+	tileSalt := n.DecodePolyIdSalt(PolyRef(ref))
+	if tile.Salt != tileSalt {
+		return nil
+	}
+
+	return tile
 }
 
 // The maximum number of tiles supported by the navigation mesh.
 // @return The maximum number of tiles supported by the navigation mesh.
 func (n *NavMesh) GetMaxTiles() int {
-	panic("implement")
+	return n.maxTiles
 }
 
 // Gets the tile at the specified index.
@@ -783,21 +914,69 @@ func (n *NavMesh) GetTile(i int) *MeshTile {
 //  @param[out]	poly	The polygon.
 // @return The status flags for the operation.
 func (n *NavMesh) GetTileAndPolyByRef(ref PolyRef) (*MeshTile, *Poly, error) {
-	panic("implement")
+	if ref == 0 {
+		return nil, nil, statusError(DT_FAILURE)
+	}
+
+	salt, it, ip := n.DecodePolyId(ref)
+	if it >= uint(n.maxTiles) {
+		return nil, nil, statusError(DT_FAILURE | DT_INVALID_PARAM)
+	}
+
+	tile := &n.tiles[it]
+	if tile.Salt != salt || tile.Header == nil {
+		return nil, nil, statusError(DT_FAILURE | DT_INVALID_PARAM)
+	}
+
+	if ip >= uint(tile.Header.PolyCount) {
+		return nil, nil, statusError(DT_FAILURE | DT_INVALID_PARAM)
+	}
+
+	return tile, &tile.Polys[ip], nil
 }
 
 // Checks the validity of a polygon reference.
 //  @param[in]	ref		The polygon reference to check.
 // @return True if polygon reference is valid for the navigation mesh.
 func (n *NavMesh) IsValidPolyRef(ref PolyRef) bool {
-	panic("implement")
+	if ref == 0 {
+		return false
+	}
+
+	salt, it, ip := n.DecodePolyId(ref)
+	if it >= uint(n.maxTiles) {
+		return false
+	}
+
+	tile := &n.tiles[it]
+	if tile.Salt != salt || tile.Header == nil {
+		return false
+	}
+
+	if ip >= uint(tile.Header.PolyCount) {
+		return false
+	}
+
+	return true
 }
 
 // Gets the polygon reference for the tile's base polygon.
 //  @param[in]	tile		The tile.
 // @return The polygon reference for the base polygon in the specified tile.
 func (n *NavMesh) GetPolyRefBase(tile *MeshTile) PolyRef {
-	panic("implement")
+	if tile == nil {
+		return 0
+	}
+
+	it := 0
+	for i := range n.tiles {
+		if tile == &n.tiles[i] {
+			it = i
+			break
+		}
+	}
+
+	return n.EncodePolyId(tile.Salt, uint(it), 0)
 }
 
 // Gets the endpoints for an off-mesh connection, ordered by "direction of travel".
@@ -806,15 +985,69 @@ func (n *NavMesh) GetPolyRefBase(tile *MeshTile) PolyRef {
 //  @param[out]	startPos	The start position of the off-mesh connection. [(x, y, z)]
 //  @param[out]	endPos		The end position of the off-mesh connection. [(x, y, z)]
 // @return The status flags for the operation.
-func (n *NavMesh) GetOffMeshConnectionPolyEndPoints(prefRef PolyRef, polyRef PolyRef) (startPos, endPos float32, _ error) {
-	panic("implement")
+func (n *NavMesh) GetOffMeshConnectionPolyEndPoints(prevRef PolyRef, polyRef PolyRef) (startPos, endPos Vector3, _ error) {
+	tile, poly, err := n.GetTileAndPolyByRef(polyRef)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Make sure that the curren tpoly is indeed off-mesh link
+	if poly.GetType() != DT_POLYTYPE_OFFMESH_CONNECTION {
+		return nil, nil, statusError(DT_FAILURE)
+	}
+
+	// Figure out which way to hand out the vertices
+	var (
+		idx0 = 0
+		idx1 = 1
+	)
+
+	// Find link that points to first vertex
+	for i := poly.FirstLink; i != DT_NULL_LINK; i = tile.Links[i].next {
+		if tile.Links[i].edge == 0 {
+			if tile.Links[i].ref != prevRef {
+				idx0 = 1
+				idx1 = 0
+			}
+			break
+		}
+	}
+
+	return CreateVector3(tile.Verts[poly.Verts[idx0]*3]), // start pos
+		CreateVector3(tile.Verts[poly.Verts[idx1]*3]), // end pos
+		nil
 }
 
 // Gets the specified off-mesh connection.
 //  @param[in]	ref		The polygon reference of the off-mesh connection.
 // @return The specified off-mesh connection, or null if the polygon reference is not valid.
-func (n *NavMesh) GetOffMeshConnectionByRef(ref PolyRef) (*OffMeshConnection, error) {
-	panic("implement")
+func (n *NavMesh) GetOffMeshConnectionByRef(ref PolyRef) *OffMeshConnection {
+	if ref == 0 {
+		return nil
+	}
+
+	// Get current polygon
+	salt, it, ip := n.DecodePolyId(ref)
+	if it >= uint(n.maxTiles) {
+		return nil
+	}
+
+	tile := &n.tiles[it]
+	if tile.Salt != salt || tile.Header == nil {
+		return nil
+	} else if ip >= uint(tile.Header.PolyCount) {
+		return nil
+	}
+
+	poly := &tile.Polys[ip]
+
+	// Make sure that the current poly is indeed off-mesh link
+	if poly.GetType() != DT_POLYTYPE_OFFMESH_CONNECTION {
+		return nil
+	}
+
+	idx := ip - uint(tile.Header.OffMeshBase)
+	return &tile.OffMeshCons[idx]
 }
 
 // @}
@@ -828,7 +1061,15 @@ func (n *NavMesh) GetOffMeshConnectionByRef(ref PolyRef) (*OffMeshConnection, er
 //  @param[in]	flags	The new flags for the polygon.
 // @return The status flags for the operation.
 func (n *NavMesh) SetPolyFlags(ref PolyRef, flags uint16) error {
-	panic("implement")
+	_, poly, err := n.GetTileAndPolyByRef(ref)
+	if err != nil {
+		return err
+	}
+
+	// Change flags
+	poly.Flags = flags
+
+	return nil
 }
 
 // Gets the user defined flags for the specified polygon.
@@ -836,7 +1077,12 @@ func (n *NavMesh) SetPolyFlags(ref PolyRef, flags uint16) error {
 //  @param[out]	resultFlags		The polygon flags.
 // @return The status flags for the operation.
 func (n *NavMesh) GetPolyFlags(ref PolyRef) (uint16, error) {
-	panic("implement")
+	_, poly, err := n.GetTileAndPolyByRef(ref)
+	if err != nil {
+		return 0, err
+	}
+
+	return poly.Flags, nil
 }
 
 // Sets the user defined area for the specified polygon.
@@ -844,7 +1090,13 @@ func (n *NavMesh) GetPolyFlags(ref PolyRef) (uint16, error) {
 //  @param[in]	area	The new area id for the polygon. [Limit: < #DT_MAX_AREAS]
 // @return The status flags for the operation.
 func (n *NavMesh) SetPolyArea(ref PolyRef, area uint8) error {
-	panic("implement")
+	_, poly, err := n.GetTileAndPolyByRef(ref)
+	if err != nil {
+		return err
+	}
+
+	poly.SetArea(area)
+	return nil
 }
 
 // Gets the user defined area for the specified polygon.
@@ -852,14 +1104,36 @@ func (n *NavMesh) SetPolyArea(ref PolyRef, area uint8) error {
 //  @param[out]	resultArea	The area id for the polygon.
 // @return The status flags for the operation.
 func (n *NavMesh) GetPolyArea(ref PolyRef) (uint8, error) {
-	panic("implement")
+	_, poly, err := n.GetTileAndPolyByRef(ref)
+	if err != nil {
+		return 0, err
+	}
+
+	return poly.GetArea(), nil
+}
+
+type TileState struct {
+	Magic   int     // Magic number, used to identify the data.
+	Version int     // Data version number.
+	Ref     TileRef // Tile ref at the time of storing the data.
+}
+
+type PolyState struct {
+	Flags uint16 // Flags (see PolyFlags)
+	Area  uint8  // Area ID of the polygon.
 }
 
 // Gets the size of the buffer required by #storeTileState to store the specified tile's state.
 //  @param[in]	tile	The tile.
 // @return The size of the buffer required to store the state.
 func (n *NavMesh) GetTileStateSize(tile *MeshTile) int {
-	panic("implement")
+	if tile == nil {
+		return 0
+	}
+
+	headerSize := align4(sizeof(TileState{}))
+	polyStateSize := align4(sizeof(PolyState{}))
+	return headerSize + polyStateSize
 }
 
 // Stores the non-structural state of the tile in the specified buffer. (Flags, area ids, etc.)
@@ -1317,7 +1591,39 @@ func (n *NavMesh) connectExtLinks(tile, target *MeshTile, side int) {
 	}
 }
 
-func (n *NavMesh) getNeighbourTilesAt(x, y, side int, tiles []*MeshTile) int {
+func (n *NavMesh) unconnectLinks(tile *MeshTile, target *MeshTile) {
+	if tile == nil || target == nil {
+		return
+	}
+
+	numTarget := n.DecodePolyIdTile(PolyRef(n.GetTileRef(target)))
+	for i := range tile.Polys {
+		poly := &tile.Polys[i]
+		currentLink := poly.FirstLink
+		prevLink := DT_NULL_LINK
+
+		for currentLink != DT_NULL_LINK {
+			if n.DecodePolyIdTile(tile.Links[currentLink].ref) == numTarget {
+				// Remove link
+				nextLink := tile.Links[currentLink].next
+				if prevLink == DT_NULL_LINK {
+					poly.FirstLink = nextLink
+				} else {
+					tile.Links[prevLink].next = nextLink
+				}
+
+				freeLink(tile, currentLink)
+				currentLink = nextLink
+				continue
+			}
+
+			// Advance
+			prevLink, currentLink = currentLink, tile.Links[currentLink].next
+		}
+	}
+}
+
+func (n *NavMesh) getNeighbourTilesAt(x, y, side int) []*MeshTile {
 	nx, ny := x, y
 	switch side {
 	case 0:
@@ -1342,7 +1648,7 @@ func (n *NavMesh) getNeighbourTilesAt(x, y, side int, tiles []*MeshTile) int {
 		ny--
 	}
 
-	return n.GetTilesAt(nx, ny, tiles)
+	return n.GetTilesAt(nx, ny)
 }
 
 func (navMesh *NavMesh) findConnectingPolys(va, vb Vector3, tile *MeshTile, side int, con []PolyRef, conarea []float32, maxcon int) int {
@@ -1486,6 +1792,10 @@ func allocLink(tile *MeshTile) uint {
 	link := tile.LinksFreeList
 	tile.LinksFreeList = tile.Links[link].next
 	return link
+}
+
+func freeLink(tile *MeshTile, link uint) {
+	tile.LinksFreeList, tile.Links[link].next = link, tile.LinksFreeList
 }
 
 func getSlabCoord(va Vector3, side int) float32 {

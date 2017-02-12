@@ -9,6 +9,14 @@ import (
 
 type Vector3 []float32
 
+// new vector with copy
+func CreateVector3(src []float32) Vector3 {
+	ret := make(Vector3, 3)
+	ret.CopyFrom(NewVector3(src))
+	return ret
+}
+
+// new vector without copy
 func NewVector3(list []float32) Vector3 {
 	return list[:3]
 }
