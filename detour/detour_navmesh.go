@@ -210,7 +210,9 @@ type Link struct {
 
 func (l *Link) Parse(r io.Reader) (err error) {
 	reader := UtilReader{r: r}
-	if l.ref, err = reader.ReadUint(); err != nil {
+	if ref, err := reader.ReadUint(); err == nil {
+		l.ref = PolyRef(ref)
+	} else { // err != nil
 		return err
 	}
 	if l.next, err = reader.ReadUint(); err != nil {

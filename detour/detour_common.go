@@ -195,8 +195,9 @@ func (u *UtilReader) ReadUint16() (uint16, error) {
 		return 0, err
 	}
 
-	return uint(u.endian().Uint16(buffer[:])), nil
+	return uint16(u.endian().Uint16(buffer[:])), nil
 }
+
 func (u *UtilReader) ReadFloat() (float32, error) {
 	var buffer [4]byte
 	if _, err := u.r.Read(buffer[:]); err != nil {
